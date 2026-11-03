@@ -18,7 +18,6 @@ told apart from their transcripts alone.
 ```bash
 pip install -r requirements.txt
 cp .env.example .env            # add your YouTube API key
-python pipeline/discover.py     # collect candidate videos
-python pipeline/transcribe.py   # transcribe them
-# then open the notebook for features, visualizations, and modeling
+python src/discover.py     # collect your Youtube videos
+python src/transcribe.py   # transcribe the youtube videos
 ```
