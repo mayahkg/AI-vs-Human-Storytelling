@@ -25,44 +25,17 @@ COLS = ["label", "url", "title", "source_query",
         "video_id", "channel", "topic", "published", "duration"]
 
 # ---------------------------------------------------------------------------
-# Batch 2 search queries, written as topic-matched pairs: (topic, AI query, human query).
-# Matching topics across classes keeps the classifier from learning "fruit = AI".
+# Search queries, written as pairs: (tag, AI query, human query).
+# The queries describe the FORMAT (skit, pov, plot twist), not a topic, so the results stay varied.
+# The tag is only a label for the pair. Theme balance is checked later, after the story filter.
 # The script alternates AI/human queries, so if a run stops early both classes stay balanced.
 # ---------------------------------------------------------------------------
 PAIRS = [
-    ("fruit",   "ai fruit love story",            "animated fruit characters story"),
-    ("fruit",   "ai fruit betrayal drama",        "fruit cartoon drama animation"),
-    ("animal",  "ai cat drama story",             "animated cat drama story"),
-    ("animal",  "ai dog rescue story",            "dog rescue short film"),
-    ("baby",    "ai toddler drama",               "toddler drama skit acting"),
-    ("baby",    "ai baby story episode",          "baby drama skit"),
-    ("family",  "ai stepmom drama story",         "stepmom drama skit"),
-    ("family",  "ai grandma drama story",         "grandma drama skit acting"),
-    ("couple",  "ai girlfriend cheating drama",   "girlfriend cheating skit acting"),
-    ("couple",  "ai wedding drama story",         "wedding drama skit"),
-    ("work",    "ai boss employee drama",         "boss employee drama skit"),
-    ("work",    "ai coworker revenge story",      "coworker drama skit"),
-    ("school",  "ai school bully story",          "school bully skit acting"),
-    ("school",  "ai teacher student drama",       "teacher student drama skit"),
-    ("horror",  "ai scary story short",           "scary story short film acting"),
-    ("romance", "ai romance love story",          "romantic short film acting"),
-]
-
-# Batch 1 queries, kept for the record. Already collected, so they are not re-run.
-BATCH1_HUMAN_QUERIES = [
-    "drama skit", "family betrayal drama scene", "pov drama skit actress",
-    "cheating boyfriend skit acting", "family drama skit acting", "mini drama skit original",
-    "short film drama emotional scene", "stop motion drama story", "claymation drama skit",
-    "puppet drama skit", "barbie doll drama skit", "toy drama story skit",
-    "sylvanian families drama", "animated food characters drama", "2d animated drama story voice acted",
-]
-BATCH1_AI_QUERIES = [
-    "ai fruit drama", "ai mini drama", "ai generated drama story", "ai fruit story episode",
-    "ai animal drama", "ai baby drama", "ai love story episode english", "ai generated story drama",
-    "ai drama episode", "veo 3 drama scene", "ai generated realistic drama people",
-    "ai cheating story drama", "ai revenge story", "ai mother in law drama", "ai family drama story",
-    "ai office drama story", "ai husband wife argument", "ai romance short film",
-    "ai cartoon drama story", "sora short story drama", "ai horror short story",
+    ("skit",   "ai skit",               "skit acting"),
+    ("comedy", "ai comedy skit",        "comedy skit acting"),
+    ("pov",    "ai pov skit",           "pov skit acting"),
+    ("drama",  "ai drama dialogue",     "drama skit acting"),
+    ("twist",  "ai plot twist story",   "plot twist skit"),
 ]
 
 # API Search Settings
@@ -71,7 +44,6 @@ MAX_SEARCH_CALLS = 90                  # live search calls per run; each costs 1
 HUMAN_BEFORE = "2023-01-10T00:00:00Z"  # Only Shorts from before AI was widely available
 AI_AFTER = "2025-01-01T00:00:00Z"
 MIN_SEC, MAX_SEC = 15, 90              # Shorts length
-MAX_PER_CHANNEL = 4                    # Avoid over-representing one creator (applied to the merged file)
 
 # Terms that confirm a video is AI-generated
 AI_TERMS = [
@@ -84,15 +56,24 @@ AI_TERMS = [
 HUMAN_BLOCK = [
     "kdrama", "k-drama", "cdrama", "c-drama", "kmovie", "kmovies", "korean drama",
     "chinese drama", "dorama", "manhwa", "minecraft", "reddit", "askreddit", "tts",
-    "podcast", "true crime", "stream", "musical", "trailer", "movie", "netflix",
-    "sopranos", "breaking bad", "game of thrones", "spongebob", "joke", "jokes", "status",
+    "podcast", "true crime", "stream", "musical", "trailer", "joke", "jokes", "status",
     "tutorial", "how to", "asmr", "review", "unboxing", "speedrun", "walkthrough",
     "gameplay", "craft", "diy", "slime",
+    # music-only videos (no dialogue)
+    "lyrics", "official audio", "music video", "remix", "karaoke", "instrumental", "lofi",
+    "song", "dance", "dancing", "rap",
+    # gaming videos and game characters
+    "roblox", "fortnite", "gta", "gaming", "gamer", "among us", "brawl stars", "free fire", "pubg",
 ]
 # Words that mean an AI-query result is off-target
 AI_BLOCK = [
     "art generator", "image generator", "tutorial", "how to", "prompt",
     "free ai", "app", "tool", "review",
+    # human gaming videos that mention "ai" (AI characters, NPCs)
+    "roblox", "minecraft", "fortnite", "gta", "gameplay", "gaming", "gamer", "npc",
+    "walkthrough", "among us", "brawl stars", "free fire", "pubg",
+    # music
+    "lyrics", "official audio", "music video", "remix", "karaoke", "instrumental", "song",
 ]
 
 # Turning Blocked/Key terms into regexes for filtering
@@ -103,6 +84,49 @@ def make_regex(terms):
 AI_RE, HUMAN_BLOCK_RE, AI_BLOCK_RE = (
     make_regex(AI_TERMS), make_regex(HUMAN_BLOCK), make_regex(AI_BLOCK))
 AI_LOOSE_RE = re.compile(r"\bai\b")
+
+# YouTube category ids to skip: 10 Music, 20 Gaming, 17 Sports, 25 News, 26 Howto & Style, 28 Science & Tech
+BLOCK_CATEGORIES = {"10", "20", "17", "25", "26", "28"}
+
+# Videos in Hindi and other languages often have no language tag, so also check the text itself:
+# non-Latin scripts (Devanagari, Arabic, Cyrillic, Thai, CJK...) or romanized Hindi/regional hints
+NON_LATIN_RE = re.compile(
+    "[\u0400-\u04FF\u0600-\u06FF\u0900-\u097F\u0980-\u09FF\u0A00-\u0A7F\u0B80-\u0BFF"
+    "\u0C00-\u0C7F\u0E00-\u0E7F\u3040-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF]")
+NON_EN_HINT_RE = re.compile(
+    r"\b(?:hindi|hinglish|urdu|bollywood|desi|bhojpuri|punjabi|tamil|telugu|bengali|"
+    r"kahani|kahaniya|bahu|bhabhi)\b")
+
+
+def bad_category(frame):
+    return frame.category.astype(str).isin(BLOCK_CATEGORIES)
+
+
+def looks_non_english(frame):
+    return frame.title.fillna("").str.contains(NON_LATIN_RE) | frame.text.str.contains(NON_EN_HINT_RE)
+
+# Fruit-character dramas are an AI-heavy genre. Cap them so they are a small share of the AI videos,
+# not the main thing (a classifier could otherwise learn "fruit = AI").
+FRUIT_RE = re.compile(
+    r"\b(?:fruit|fruits|banana|bananas|strawberry|strawberries|apple|apples|orange|oranges|mango|"
+    r"pineapple|watermelon|cherry|cherries|peach|lemon|avocado|tomato|grape|grapes|coconut|"
+    r"blueberry|melon)\b")
+MAX_FRUIT_SHARE = 0.10                 # fruit-titled AI videos allowed, as a share of all AI videos
+
+
+def fruit_mask(frame):
+    return (frame.label == "AI") & frame.title.fillna("").str.lower().str.contains(FRUIT_RE)
+
+
+def cap_fruit(fresh, old):
+    """Drop new fruit-titled AI videos beyond the cap. Existing rows (old) are never removed."""
+    new_fruit = fruit_mask(fresh)
+    base = (old.label == "AI").sum() + ((fresh.label == "AI") & ~new_fruit).sum()
+    allowed = max(0, int(MAX_FRUIT_SHARE * base) - int(fruit_mask(old).sum()))
+    drop = fresh[new_fruit].index[allowed:]      # fresh is already shuffled, so this is a random pick
+    print(f"Fruit cap: {int(new_fruit.sum())} new fruit-titled AI videos found, "
+          f"keeping {min(allowed, int(new_fruit.sum()))}, dropping {len(drop)}")
+    return fresh.drop(drop)
 
 
 class BudgetReached(Exception):
@@ -159,6 +183,7 @@ def get_details(ids):
                 "description": s.get("description", ""),
                 "tags": " ".join(s.get("tags", [])),
                 "published": s["publishedAt"],
+                "category": s.get("categoryId"),
                 "audio_lang": s.get("defaultAudioLanguage") or s.get("defaultLanguage"),
                 "duration": isodate.parse_duration(
                     v["contentDetails"]["duration"]).total_seconds(),
@@ -184,7 +209,7 @@ def collect(query, query_type, topic, **filters):
 
 
 # Old rows only have label/url/title/source_query. Fetch channel, date and duration for them
-# (about 1 quota unit per 50 videos) so the channel cap and group-aware CV work on the whole dataset.
+# (about 1 quota unit per 50 videos) so group-aware CV works on the whole dataset.
 def backfill_metadata(old):
     for col in ["video_id", "channel", "topic", "published", "duration"]:
         if col not in old.columns:
@@ -243,6 +268,15 @@ print("After language filter:", df.query_type.value_counts().to_dict())
 
 df["text"] = (df.title + " " + df.description + " " + df.tags).str.lower()
 
+n0 = len(df)
+dropped_cat = df[bad_category(df)].category.value_counts().to_dict()
+df = df[~bad_category(df)].copy()
+print(f"After category filter (dropped {n0 - len(df)}: {dropped_cat}):", df.query_type.value_counts().to_dict())
+
+n0 = len(df)
+df = df[~looks_non_english(df)].copy()
+print(f"After non-English text filter (dropped {n0 - len(df)}):", df.query_type.value_counts().to_dict())
+
 # Labelling Data
 def label(r):
     flagged = pd.notna(r.synthetic_flag) and bool(r.synthetic_flag)
@@ -263,7 +297,7 @@ df = df[df.group != "uncertain"]
 if df.empty:
     raise SystemExit("Nothing left after filtering. Try more queries or looser settings.")
 
-# Shuffle so the channel cap below doesn't favor whichever query ran first
+# Shuffle so the fruit cap below picks at random instead of favoring whichever query ran first
 df = df.sample(frac=1, random_state=42)
 df["label"] = df.group.map({"ai_candidate": "AI", "human_candidate": "human"})
 new = df[COLS]
@@ -276,17 +310,13 @@ if CSV.exists():
         old["label"] = np.where(old.group.str.startswith("ai"), "AI", "human")
     old = backfill_metadata(old)
     fresh = new[~new.url.isin(old.url)]
+    fresh = cap_fruit(fresh, old)
     print(f"\nExisting rows kept: {len(old)} | new rows added: {len(fresh)}")
     out = pd.concat([old, fresh], ignore_index=True)
 else:
-    out = new.reset_index(drop=True)
+    out = cap_fruit(new, new.iloc[0:0]).reset_index(drop=True)
 
-# Channel cap on the merged data (old rows come first, so they're kept over new ones)
 out = out.drop_duplicates("url")
-out["_ch"] = out.channel.fillna(out.url)
-n_before = len(out)
-out = out.groupby(["label", "_ch"], sort=False).head(MAX_PER_CHANNEL).drop(columns="_ch")
-print(f"Channel cap ({MAX_PER_CHANNEL}) removed {n_before - len(out)} rows")
 
 out = out.reindex(columns=COLS)
 out.to_csv(CSV, index=False)
@@ -294,7 +324,9 @@ out.to_csv(CSV, index=False)
 # Summary
 print(f"\nSaved {len(out)} rows to {CSV}")
 print(out.label.value_counts().to_string())
-print("\nTopic balance:")
+fm = fruit_mask(out)
+print(f"\nFruit-titled AI videos: {int(fm.sum())} of {int((out.label == 'AI').sum())} AI rows")
+print("\nTag balance (batch1 = collected earlier):")
 print(pd.crosstab(out.topic, out.label).to_string())
 print(f"\nUnique channels: {out.channel.nunique()}")
 print("\nSample AI videos:")
