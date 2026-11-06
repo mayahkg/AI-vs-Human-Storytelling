@@ -21,8 +21,7 @@ cp .env.example .env            # add your YouTube API key
 python src/discover.py     # collect your Youtube videos
 python src/transcribe.py   # transcribe the youtube videos
 ```
-# Extra features (Cole): two versions
-
+# Extra features: two versions
 Two ways to improve the model in `notebooks/model.ipynb`. Both start from the 36 features in `data/features.csv`
 and only **add** new files; no existing file is changed.
 

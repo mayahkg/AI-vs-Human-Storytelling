@@ -19,12 +19,9 @@ MAX_REPEAT_SHARE = 0.4       # share of repeated 3-word phrases; above this is a
 DELAY_RANGE = (3, 8)         # random pause (seconds) between downloads
 RETRY_FAILED = False         # True = retry videos whose download/transcription failed last run
 APPLY_TITLE_FILTER = True    # drop obvious non-stories by title (same rule for AI and human)
-# Candidate files to look for, first match wins (discover.py writes data/candidates.csv)
-SRC_CANDIDATES = ["data/candidates.csv", "candidates.csv",
-                  "data/candidates_v2.csv", "candidates_v2.csv"]
 # --------------------------------------------------------
 
-# Maps batch-1 source_queries to a theme. Batch-2 rows from discover.py already have a 'topic'
+# Maps batch-1 source_queries to a theme. Batch-2 rows from collect_videos.py already have a 'topic'
 # column, which is used directly, so only older queries need to be listed here.
 # Each theme needs BOTH AI and human rows, otherwise the balanced file skips it. Edit freely.
 THEME_MAP = {
@@ -72,12 +69,14 @@ THEME_MAP = {
     "pov drama skit actress": "general_drama",
 }
 
-HERE = pathlib.Path(__file__).parent
-SRC = next((HERE / p for p in SRC_CANDIDATES if (HERE / p).exists()), None)
-WORK = HERE / "transcripts_work_v2.csv"   # progress file (every video tried, so reruns resume)
-FINAL = HERE / "dataset_v2.csv"           # balanced per theme: the one to model on
-FINAL_ALL = HERE / "dataset_v2_all.csv"   # every usable transcript, unbalanced
-AUDIO_DIR = HERE / "audio"
+ROOT = pathlib.Path(__file__).resolve().parents[1]   # project root (the folder above src/)
+DATA = ROOT / "data"
+DATA.mkdir(exist_ok=True)
+SRC = DATA / "candidates.csv"             # input, written by collect_videos.py
+WORK = DATA / "transcripts.csv"           # output + progress file (every video tried, so reruns resume)
+FINAL = DATA / "dataset_v2.csv"           # balanced per theme: the one to model on
+FINAL_ALL = DATA / "dataset_v2_all.csv"   # every usable transcript, unbalanced
+AUDIO_DIR = ROOT / "audio"
 AUDIO_DIR.mkdir(exist_ok=True)
 
 WORK_COLS = ["video_id", "label", "theme", "url", "title", "source_query",
@@ -108,13 +107,13 @@ def junk_reason(text):
 
 
 # ---- load source and progress ----
-if SRC is None:
-    raise SystemExit(f"Could not find a candidates file. Looked for: {SRC_CANDIDATES}")
-print("Reading candidates from:", SRC.relative_to(HERE))
+if not SRC.exists():
+    raise SystemExit(f"Could not find {SRC}. Run src/collect_videos.py first.")
+print("Reading candidates from:", SRC.relative_to(ROOT))
 
 src = pd.read_csv(SRC)
 if "theme" not in src.columns:
-    # Batch-2 rows: use the 'topic' column from discover.py. Batch-1 rows: map source_query via THEME_MAP.
+    # Batch-2 rows: use the 'topic' column from collect_videos.py. Batch-1 rows: map source_query via THEME_MAP.
     theme = src["source_query"].astype(str).str.strip().str.lower().map(THEME_MAP)
     if "topic" in src.columns:
         theme = theme.fillna(src["topic"].where(src["topic"] != "batch1"))
@@ -239,7 +238,7 @@ while True:
 # ---- build final CSVs ----
 ok = work[work.status == "ok"].copy()
 if ok.empty:
-    raise SystemExit("No usable transcripts yet. Check the status counts in transcripts_work_v2.csv.")
+    raise SystemExit("No usable transcripts yet. Check the status counts in data/transcripts.csv.")
 ok["n_words"] = ok["n_words"].astype(float)
 
 # Attach channel / publish date / duration from the candidates file (needed for channel-grouped CV)
