@@ -16,3 +16,11 @@ yt-dlp
 torch
 transformers
 vaderSentiment
+
+# notebooks (data_cleaning, visualisations, model)
+scikit-learn
+matplotlib
+seaborn
+# optional for POS chart in visualisations.ipynb:
+# spacy
+# python -m spacy download en_core_web_sm
