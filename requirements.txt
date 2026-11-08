@@ -1,7 +1,18 @@
-google-api-python-client==2.201.0
-isodate==0.7.2
+# Shared
 numpy==2.5.4
 pandas==3.0.6
 python-dotenv
+requests
+
+# collect_videos.py
+google-api-python-client==2.201.0
+isodate==0.7.2
+
+# transcribe_videos.py
 faster-whisper==1.2.1
 yt-dlp
+
+# embeddings_generation.py
+torch
+transformers
+vaderSentiment

@@ -1,21 +1,21 @@
 """
-Max version (Cole): adds 80 handcrafted features to data/features.csv and saves GPT-2 embeddings.
+Adds ~80 handcrafted features + GPT-2 detector signals and embeddings
+on top of the basic features from filtered_feature_generation.py.
 
-Writes (data/features.csv itself is not changed):
-  data/features_cole_max.csv      original 36 features + 80 new ones (116 handcrafted features)
-  data/gpt2_embeddings_cole.csv   768 GPT-2 embedding numbers per transcript
+Reads:
+  data/features_filtered_by_ai.csv   (basic features + video_id + y)
+  data/transcripts.csv               (or transcripts_filtered.csv) for the raw text
 
-Run from anywhere:  python src/cole_features_max.py
-Needs: pip install vaderSentiment torch transformers   (downloads GPT-2, ~500 MB, the first time)
-Both output files are committed, so notebooks/model_cole_max.ipynb runs without any of this.
+Writes:
+  data/features_and_embeddings.csv   transcript + all handcrafted features + y
+  data/gpt2_embeddings.csv           video_id + 768 GPT-2 embedding dimensions
 
-The 80 new features, all computed on the original transcripts in data/transcripts_filtered.csv:
-  - the 11 word families from the simple version (src/cole_features_simple.py)
-  - story structure: climax position, conflict position, plot bombs, topic jumps, stakes raises, tempo change, ...
-  - emotional arc (VADER sentiment per sentence): average mood, swings, ending mood, rise
-  - narration style: past tense, third person, narrator vocabulary, hook openings, moral endings
-  - readability, punctuation, pronouns, sentence openings, more word families
-  - GPT-2 "AI detector" signals: how predictable each word is to GPT-2 (surprisal, rank, entropy)
+Run from project root:
+    python src/embeddings_generation.py
+
+Needs:
+    pip install vaderSentiment torch transformers
+    (downloads GPT-2 ~500 MB the first time)
 """
 import math
 import os
@@ -29,19 +29,29 @@ import torch
 from transformers import GPT2LMHeadModel, GPT2TokenizerFast
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
-from cole_features_simple import FAMILIES as SIMPLE_FAMILIES, words
+# ---------------------------------------------------------------------------
+# Paths (script lives in src/, data/ is one level up)
+# ---------------------------------------------------------------------------
+DATA = pathlib.Path(__file__).resolve().parent.parent / "data"
+FEATURES_IN = DATA / "features_filtered_by_ai.csv"
+FEATURES_OUT = DATA / "features_and_embeddings.csv"
+EMBEDDINGS_OUT = DATA / "gpt2_embeddings.csv"
 
-# File paths (anchored to this script's folder)
-DATA = pathlib.Path(__file__).parent.parent / "data"
-TRANSCRIPTS = DATA / "transcripts_filtered.csv"
-FEATURES_IN = DATA / "features.csv"
-FEATURES_OUT = DATA / "features_cole_max.csv"
-EMBEDDINGS_OUT = DATA / "gpt2_embeddings_cole.csv"
+# Prefer the filtered transcripts file if it exists, otherwise the full one
+if (DATA / "transcripts_filtered.csv").exists():
+    TRANSCRIPTS = DATA / "transcripts_filtered.csv"
+else:
+    TRANSCRIPTS = DATA / "transcripts.csv"
 
 vader = SentimentIntensityAnalyzer()
 LEXICON = vader.lexicon
 tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
 gpt2 = GPT2LMHeadModel.from_pretrained("gpt2", output_hidden_states=True).eval()
+
+
+def words(*items):
+    """Regex that matches any of the given words/phrases as whole words."""
+    return re.compile(r"\b(?:" + "|".join(items) + r")\b", re.I)
 
 
 def starts(pattern):
@@ -50,81 +60,201 @@ def starts(pattern):
 
 
 # ---------------------------------------------------------------------------
-# Word lists (edit freely)
+# 11 word families (exact lists from cole_features_simple.py)
+# ---------------------------------------------------------------------------
+SIMPLE_FAMILIES = {
+    # --- spoken vs. written style ---
+    "discourse_markers": words(
+        "oh", "yeah", "well", "okay", "ok", "so", "hey", "hi", "right", "alright", "all right",
+        "you know", "i mean", "actually", "anyway", "um", "uh", "i guess", "like",
+    ),
+    "casual_verbs": words(
+        "got", "gotta", "gonna", "wanna", "get", "gets", "getting", "trying", "tryna", "come on",
+        "kinda", "sorta", "ain't", "y'all", "lemme", "gimme", "dunno",
+    ),
+    "slang": words(
+        "gonna", "wanna", "gotta", "kinda", "sorta", "ain't", "y'all", "bro", "bruh", "dude", "guys",
+        "lol", "nah", "yo", "dawg", "sus", "lowkey", "deadass", "cuz", "ya", "yup", "lemme", "gimme",
+        "dunno", "whatcha", "imma",
+    ),
+    "subordinators": words(
+        "who", "whom", "whose", "which", "while", "before", "after", "until", "because",
+        "although", "though", "since", "unless", "whenever", "wherever", "whereas", "once",
+    ),
+    "time_connectives": words(
+        "then", "before", "after", "later", "finally", "until", "while", "once", "suddenly",
+        "years", "that night", "the next day", "one day", "since",
+    ),
+    # --- story content ---
+    "reveal_words": words(
+        "truth", "secret", "secrets", "hiding", "hide", "hid", "hidden", "kept", "explain",
+        "lie", "lied", "lying", "found out", "find out", "discover", "discovered", "knew",
+        "realized", "realize", "confess", "admit",
+    ),
+    "absolutist": words(
+        "absolutely", "all", "always", "complete", "completely", "constant", "constantly",
+        "definitely", "entire", "entirely", "ever", "every", "everyone", "everybody", "everything",
+        "full", "fully", "must", "never", "nothing", "nobody", "no one", "totally", "whole", "forever",
+    ),
+    "kinship": words(
+        "mother", "father", "mom", "dad", "mommy", "daddy", "son", "daughter", "sister", "brother",
+        "husband", "wife", "grandma", "grandpa", "grandmother", "grandfather", "family", "parents",
+        "aunt", "uncle",
+    ),
+    "future_modals": words("will", "won't", "shall", "going to", "must", "promise"),
+    "love_talk": words(
+        "i love you", "love you", "my love", "darling", "sweetheart", "honey", "babe", "kiss",
+        "marry me", "soulmate", "i miss you", "beautiful", "handsome",
+    ),
+    "apology": words(
+        "i'm sorry", "im sorry", "i am sorry", "sorry", "forgive me", "my fault", "i didn't mean",
+        "i shouldn't have", "i messed up",
+    ),
+}
+
+# ---------------------------------------------------------------------------
+# Word lists used by the extra features
 # ---------------------------------------------------------------------------
 URGENCY = {"tonight", "today", "tomorrow", "now", "forever", "yesterday", "soon", "again", "finally"}
-IMPERATIVE_STARTS = {"go", "come", "look", "listen", "wait", "stop", "give", "get", "tell", "let", "take", "don't",
-                     "run", "help", "please", "leave", "relax", "hold", "watch", "shut", "move", "stay"}
-THIRD_PERSON = {"he", "she", "they", "him", "her", "them", "his", "hers", "their", "he's", "she's", "they're",
-                "himself", "herself"}
-FIRST_SECOND = {"i", "me", "my", "you", "your", "i'm", "you're", "mine", "yours", "myself", "yourself"}
-PAST_TENSE_VERBS = {"was", "were", "had", "said", "told", "went", "came", "saw", "knew", "took", "felt", "thought",
-                    "found", "left", "got", "made"}
-STOPWORDS = set("""a an the and or but so to of in on at for with is are was were be been am i you he she it we they me
+IMPERATIVE_STARTS = {
+    "go", "come", "look", "listen", "wait", "stop", "give", "get", "tell", "let",
+    "take", "don't", "run", "help", "please", "leave", "relax", "hold", "watch",
+    "shut", "move", "stay",
+}
+THIRD_PERSON = {
+    "he", "she", "they", "him", "her", "them", "his", "hers", "their",
+    "he's", "she's", "they're", "himself", "herself",
+}
+FIRST_SECOND = {
+    "i", "me", "my", "you", "your", "i'm", "you're", "mine", "yours",
+    "myself", "yourself",
+}
+PAST_TENSE_VERBS = {
+    "was", "were", "had", "said", "told", "went", "came", "saw", "knew", "took",
+    "felt", "thought", "found", "left", "got", "made",
+}
+STOPWORDS = set("""
+a an the and or but so to of in on at for with is are was were be been am i you he she it we they me
 him her us them my your his its our their this that these those do does did not no yes oh what why how who where
 when just can will would could should have has had there here then than if as up out down off all i'm you're it's
-don't can't that's okay ok yeah hey well now go get got know like want come one let's gonna really""".split())
-NOT_NAMES = {"The", "And", "But", "You", "What", "Why", "How", "Oh", "Okay", "God", "Mom", "Dad", "Yes", "Hey", "This",
-             "That", "Come", "Wait", "Please", "Mr", "Mrs", "Miss", "Sir", "Well", "So", "No", "I'm", "It's"}
+don't can't that's okay ok yeah hey well now go get got know like want come one let's gonna really
+""".split())
+NOT_NAMES = {
+    "The", "And", "But", "You", "What", "Why", "How", "Oh", "Okay", "God", "Mom", "Dad",
+    "Yes", "Hey", "This", "That", "Come", "Wait", "Please", "Mr", "Mrs", "Miss", "Sir",
+    "Well", "So", "No", "I'm", "It's",
+}
 
-BLAME = starts(r"how could you|it was you|it's your fault|your fault|you did this|you lied|you cheated|you betrayed|"
-               r"you ruined|you knew|why did you|you never|you always|because of you|you stole|you broke|blame")
-SOAP = starts(r"jealous\w*|envy|envious|who is (she|he)|who's (she|he)|is that your|stay away from (him|her|my)|"
-              r"embarrass\w*|humiliat\w*|ashamed|shame|everyone (is )?laughing|disgrace|"
-              r"secret|the truth|i know what you did|i saw (you|it|them)|you knew|found out|caught|all along|"
-              r"turns out|i have to tell you")
-CLICHE = starts(r"i can explain|it's not what it looks like|we need to talk|this isn't over|you'll regret this|"
-                r"how could you|i trusted you|after everything|you mean nothing|i never want to see you|"
-                r"get out of my (house|life)|you don't deserve|i should have known|it was all a lie|you're nothing|"
-                r"i've always loved you|i can't do this anymore|let me explain|this changes everything|what have you done")
-CONFLICT = starts(r"cheat\w*|li(e|ed|ar|ying)\b|secret|betray\w*|kill\w*|dead\b|die\b|steal|stole|how dare|"
-                  r"how could you|it was you|why did you|you knew|caught|pregnant|divorce|affair|truth|hate|leave me|"
-                  r"get out|stop|no way")
-NARRATOR_VOCAB = starts(r"whisper\w*|realiz\w*|smil\w*|tears?|heart\w*|eyes|suddenly|little did|from that day|"
-                        r"never forget|couldn't believe|took a deep breath|froze|gasp\w*|trembl\w*|glanc\w*|stared|"
-                        r"murmur\w*|nodded|sigh\w*")
-VIRTUE = starts(r"kindness|kind|courage|strength|brave\w*|hope|dream\w*|journey|lesson|believe|grateful|gratitude|"
-                r"compassion|respect|forgive\w*|true (friend|love|strength)|matter\w*|worth|deserve\w*|proud")
-HOOK = starts(r"you need to watch|watch (this|till|until) the end|wait for it|this is the story|this is (\w+)'s story|"
-              r"imagine|what would you do|pov|story time|let me tell you|you won't believe|nobody expected|"
-              r"if you've ever|have you ever")
-MORAL = starts(r"lesson|remember|never judge|be kind|always be|the moral|kindness|true (strength|love|friend)|"
-               r"matters? most|what really matters|that's why|in the end|from that day|never forget|"
-               r"you never know|be grateful|treat (people|others)")
-# big life events a story can pivot on ("plot bombs")
-PLOT_BOMBS = [starts(p) for p in [
-    r"pregnant|baby|the child|my child|your child", r"marry|married|wedding|engaged|propose|husband|wife",
-    r"break up|broke up|divorce|leave me|i'm leaving|we're done|it's over", r"cheat\w*|affair|someone else|another (man|woman)",
-    r"\bdie\b|died|dead|death|kill\w*|funeral|murder\w*", r"rich|poor|money|billion\w*|million\w*|fired|job|ceo|inherit\w*",
-    r"arrest\w*|police|steal|stole|prison|jail", r"hospital|sick|accident|doctor|surgery|cancer",
-    r"real (father|mother|dad|mom)|adopted|twin|disguise|who you really|i'm actually|you're actually",
-    r"secret|the truth|found out|i know what you did"]]
+BLAME = starts(
+    r"how could you|it was you|it's your fault|your fault|you|you did this|you lied|you cheated|"
+    r"you betrayed|you ruined|you knew|why did you|you never|you always|because of you|"
+    r"you stole|you broke|blame"
+)
+SOAP = starts(
+    r"jealous\w*|envy|envious|who is (she|he)|who's (she|he)|is that your|"
+    r"stay away from (him|her|my)|embarrass\w*|humiliat\w*|ashamed|shame|"
+    r"everyone (is )?laughing|disgrace|secret|the truth|i know what you did|"
+    r"i saw (you|it|them)|you knew|found out|caught|all along|turns out|i have to tell you"
+)
+CLICHE = starts(
+    r"i can explain|it's not what it looks like|we need to talk|this isn't over|"
+    r"you'll regret this|how could you|i trusted you|after everything|you mean nothing|"
+    r"i never want to see you|get out of my (house|life)|you don't deserve|"
+    r"i should have known|it was all a lie|you're nothing|i've always loved you|"
+    r"i can't do this anymore|let me explain|this changes everything|what have you done"
+)
+CONFLICT = starts(
+    r"cheat\w*|li(e|ed|ar|ying)\b|secret|betray\w*|kill\w*|dead\b|die\b|steal|stole|"
+    r"how dare|how could you|it was you|why did you|you knew|caught|pregnant|divorce|"
+    r"affair|truth|hate|leave me|get out|stop|no way"
+)
+NARRATOR_VOCAB = starts(
+    r"whisper\w*|realiz\w*|smil\w*|tears?|heart\w*|eyes|suddenly|little did|"
+    r"from that day|never forget|couldn't believe|took a deep breath|froze|"
+    r"gasp\w*|trembl\w*|glanc\w*|stared|murmur\w*|nodded|sigh\w*"
+)
+VIRTUE = starts(
+    r"kindness|kind|courage|strength|brave\w*|hope|dream\w*|journey|lesson|"
+    r"believe|grateful|gratitude|compassion|respect|forgive\w*|"
+    r"true (friend|love|strength)|matter\w*|worth|deserve\w*|proud"
+)
+HOOK = starts(
+    r"you need to watch|watch (this|till|until) the end|wait for it|"
+    r"this is the story|this is (\w+)'s story|imagine|what would you do|pov|"
+    r"story time|let me tell you|you won't believe|nobody expected|"
+    r"if you've ever|have you ever"
+)
+MORAL = starts(
+    r"lesson|remember|never judge|be kind|always be|the moral|kindness|"
+    r"true (strength|love|friend)|matters? most|what really matters|that's why|"
+    r"in the end|from that day|never forget|you never know|be grateful|"
+    r"treat (people|others)"
+)
+
+PLOT_BOMBS = [
+    starts(p) for p in [
+        r"pregnant|baby|the child|my child|your child",
+        r"marry|married|wedding|engaged|propose|husband|wife",
+        r"break up|broke up|divorce|leave me|i'm leaving|we're done|it's over",
+        r"cheat\w*|affair|someone else|another (man|woman)",
+        r"\bdie\b|died|dead|death|kill\w*|funeral|murder\w*",
+        r"rich|poor|money|billion\w*|million\w*|fired|job|ceo|inherit\w*",
+        r"arrest\w*|police|steal|stole|prison|jail",
+        r"hospital|sick|accident|doctor|surgery|cancer",
+        r"real (father|mother|dad|mom)|adopted|twin|disguise|who you really|i'm actually|you're actually",
+        r"secret|the truth|found out|i know what you did",
+    ]
+]
+
 MORE_FAMILIES = {
     "absolutist": SIMPLE_FAMILIES["absolutist"],
-    "audience_address": words("guys", "you guys", "everyone", "hello", "hi", "welcome", "subscribe", "comment",
-                              "follow", "today we", "let's go", "ready", "check this out", "watch this"),
-    "cognitive": words("think", "thought", "know", "knew", "realize", "realized", "understand", "understood", "believe",
-                       "remember", "wonder", "mean", "meant", "decide", "decided", "figure"),
-    "perception": words("see", "saw", "seen", "look", "looked", "looking", "hear", "heard", "feel", "felt", "watch",
-                        "watched", "listen", "smell", "touch"),
-    "certainty": words("sure", "definitely", "certainly", "of course", "obviously", "clearly", "absolutely", "exactly"),
-    "hedges": words("maybe", "probably", "perhaps", "kind of", "sort of", "i guess", "i think", "might", "possibly"),
-    "body": words("hand", "hands", "eyes", "face", "head", "heart", "arms", "arm", "hair", "lips", "voice", "chest",
-                  "tears", "fingers", "shoulder"),
-    "number_words": words(r"\d+", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
-                          "hundred", "thousand", "million", "first", "second", "third", "dollars"),
+    "audience_address": words(
+        "guys", "you guys", "everyone", "hello", "hi", "welcome", "subscribe",
+        "comment", "follow", "today we", "let's go", "ready", "check this out", "watch this",
+    ),
+    "cognitive": words(
+        "think", "thought", "know", "knew", "realize", "realized", "understand",
+        "understood", "believe", "remember", "wonder", "mean", "meant", "decide", "decided", "figure",
+    ),
+    "perception": words(
+        "see", "saw", "seen", "look", "looked", "looking", "hear", "heard", "feel",
+        "felt", "watch", "watched", "listen", "smell", "touch",
+    ),
+    "certainty": words(
+        "sure", "definitely", "certainly", "of course", "obviously", "clearly",
+        "absolutely", "exactly",
+    ),
+    "hedges": words(
+        "maybe", "probably", "perhaps", "kind of", "sort of", "i guess", "i think",
+        "might", "possibly",
+    ),
+    "body": words(
+        "hand", "hands", "eyes", "face", "head", "heart", "arms", "arm", "hair",
+        "lips", "voice", "chest", "tears", "fingers", "shoulder",
+    ),
+    "number_words": words(
+        r"\d+", "one", "two", "three", "four", "five", "six", "seven", "eight",
+        "nine", "ten", "hundred", "thousand", "million", "first", "second", "third", "dollars",
+    ),
     "politeness": words("please", "thank you", "thanks", "excuse me", "pardon"),
-    "intensifiers": words("very", "really", "so", "too", "totally", "super", "extremely", "literally", "such"),
-    "negative_contractions": words("isn't", "aren't", "wasn't", "weren't", "don't", "doesn't", "didn't", "won't",
-                                   "can't", "couldn't", "shouldn't", "wouldn't", "haven't", "hasn't"),
+    "intensifiers": words(
+        "very", "really", "so", "too", "totally", "super", "extremely", "literally", "such",
+    ),
+    "negative_contractions": words(
+        "isn't", "aren't", "wasn't", "weren't", "don't", "doesn't", "didn't",
+        "won't", "can't", "couldn't", "shouldn't", "wouldn't", "haven't", "hasn't",
+    ),
     "conjunction_starts": re.compile(r"(?:^|[.!?]\s+)(?:and|but|so|or|because)\b", re.I),
     "wh_questions": re.compile(r"\b(?:what|why|how|who|where|when|which)\b[^.!?]*\?", re.I),
 }
-PRONOUNS = {"i_rate": {"i", "me", "my", "mine", "myself", "i'm", "i've", "i'll", "i'd"},
-            "you_rate": {"you", "your", "yours", "yourself", "you're", "you've", "you'll", "you'd"},
-            "he_rate": {"he", "him", "his", "himself", "he's"},
-            "she_rate": {"she", "her", "hers", "herself", "she's"},
-            "they_rate": {"they", "them", "their", "theirs", "themselves", "they're"}}
+
+PRONOUNS = {
+    "i_rate": {"i", "me", "my", "mine", "myself", "i'm", "i've", "i'll", "i'd"},
+    "you_rate": {"you", "your", "yours", "yourself", "you're", "you've", "you'll", "you'd"},
+    "he_rate": {"he", "him", "his", "himself", "he's"},
+    "she_rate": {"she", "her", "hers", "herself", "she's"},
+    "they_rate": {"they", "them", "their", "theirs", "themselves", "they're"},
+}
 
 
 def tokenize(text):
@@ -174,7 +304,7 @@ def extract(transcript):
     sents = split_sentences(text)
     k = len(sents)
     lengths = np.array([len(tokenize(s)) for s in sents], float)
-    pos = (np.cumsum(lengths) - lengths / 2) / lengths.sum()          # middle of each sentence, 0-1 through the clip
+    pos = (np.cumsum(lengths) - lengths / 2) / lengths.sum()          # middle of each sentence, 0-1
     first, last = pos < 1 / 3, pos >= 2 / 3
     mood = np.array([vader.polarity_scores(s)["compound"] for s in sents])
     intensity = np.abs(mood)
@@ -190,7 +320,8 @@ def extract(transcript):
     content = [set(w for w in tokenize(s) if w not in STOPWORDS) for s in sents]
     overlaps = []
     for i in range(1, k):
-        before, after = set().union(*content[max(0, i - 3):i]), set().union(*content[i:i + 3])
+        before = set().union(*content[max(0, i - 3):i])
+        after = set().union(*content[i:i + 3])
         if before and after:
             overlaps.append(len(before & after) / len(before | after))
 
@@ -202,7 +333,7 @@ def extract(transcript):
     ending = mood[last].mean() if last.any() else mood[-1]
 
     f = {
-        # simple-version word families
+        # 11 word families
         **{f"{name}_per100": 100 * len(p.findall(text)) / n for name, p in SIMPLE_FAMILIES.items()},
         # story structure
         "climax_position": pos[int(intensity.argmax())],
@@ -221,8 +352,10 @@ def extract(transcript):
         "soap_emotion_per100": per100(SOAP),
         "cliche_per100": per100(CLICHE),
         "urgency_rate": sum(w in URGENCY for w in tokens) / n,
-        "word_runs_per100": 100 * (sum(a == b for a, b in zip(tokens, tokens[1:]))
-                                   + len(re.findall(r"\b\w{1,3}-(\s|$)|\w—|\.\.\.", text))) / n,
+        "word_runs_per100": 100 * (
+            sum(a == b for a, b in zip(tokens, tokens[1:]))
+            + len(re.findall(r"\b\w{1,3}-(\s|$)|\w—|\.\.\.", text))
+        ) / n,
         # emotional arc
         "sent_mean": mood.mean(),
         "sent_intensity": intensity.mean(),
@@ -239,8 +372,10 @@ def extract(transcript):
         "hook_opening": int(bool(HOOK.search(" ".join(sents[:2])))),
         "moral_ending": int(bool(MORAL.search(" ".join(sents[-2:])))),
         "third_person_ratio": sum(w in THIRD_PERSON for w in tokens) / max(1, sum(w in FIRST_SECOND for w in tokens)),
-        "past_tense_rate": sum(w.endswith("ed") and len(w) > 4 for w in tokens) / n
-                           + sum(w in PAST_TENSE_VERBS for w in tokens) / n,
+        "past_tense_rate": (
+            sum(w.endswith("ed") and len(w) > 4 for w in tokens) / n
+            + sum(w in PAST_TENSE_VERBS for w in tokens) / n
+        ),
         # readability and punctuation
         "syllables_per_word": np.mean(syl),
         "polysyllable_rate": 100 * np.mean([s >= 3 for s in syl]),
@@ -264,24 +399,68 @@ def extract(transcript):
 
 
 def main():
-    features = pd.read_csv(FEATURES_IN, float_precision="round_trip")  # keep the original values digit-for-digit
+    if not FEATURES_IN.exists():
+        raise SystemExit(
+            f"Could not find {FEATURES_IN}.\n"
+            "Run filtered_feature_generation.py first to create features_filtered_by_ai.csv."
+        )
+    if not TRANSCRIPTS.exists():
+        raise SystemExit(
+            f"Could not find {TRANSCRIPTS}.\n"
+            "Need a transcripts file with at least video_id and transcript columns."
+        )
+
+    features = pd.read_csv(FEATURES_IN)
     transcripts = pd.read_csv(TRANSCRIPTS)
 
-    # features.csv rows are in the same order as transcripts_filtered.csv; make sure before joining
-    norm = lambda s: s.str.strip().str.lower().str.replace(r"\s+", " ", regex=True)
-    assert len(features) == len(transcripts) and (norm(features.transcript).values == norm(transcripts.transcript).values).all(), \
-        "features.csv and transcripts_filtered.csv are not in the same row order"
+    if "video_id" not in features.columns:
+        raise SystemExit(f"{FEATURES_IN} is missing a video_id column.")
+    if "video_id" not in transcripts.columns or "transcript" not in transcripts.columns:
+        raise SystemExit(f"{TRANSCRIPTS} must contain video_id and transcript columns.")
 
-    rows, embeddings = zip(*[extract(t) for t in transcripts.transcript])
+    # Keep only rows that still have a usable transcript
+    transcripts = transcripts.dropna(subset=["transcript"])
+    transcripts["transcript"] = transcripts["transcript"].astype(str)
+    transcripts = transcripts[transcripts["transcript"].str.strip() != ""]
+
+    # Join on video_id (order-independent)
+    merged = features.merge(
+        transcripts[["video_id", "transcript"]],
+        on="video_id",
+        how="inner",
+        validate="one_to_one",
+    )
+    if len(merged) == 0:
+        raise SystemExit("No overlapping video_ids between features and transcripts.")
+    if len(merged) < len(features):
+        print(f"Warning: dropped {len(features) - len(merged)} feature rows with no matching transcript.")
+
+    print(f"Computing extra features + GPT-2 embeddings for {len(merged)} transcripts...")
+    rows, embeddings = zip(*[extract(t) for t in merged["transcript"]])
     extra = pd.DataFrame(list(rows))
-    out = pd.concat([features.drop(columns="y"), extra, features[["y"]]], axis=1)
+
+    # Build output in the same style as the existing features_and_embeddings.csv:
+    # transcript first, then the basic features (drop video_id / label), then the new ones, then y
+    base_cols = [c for c in features.columns if c not in ("video_id", "label", "y")]
+    out = pd.concat(
+        [
+            merged[["transcript"]].reset_index(drop=True),
+            merged[base_cols].reset_index(drop=True),
+            extra.reset_index(drop=True),
+            merged[["y"]].reset_index(drop=True),
+        ],
+        axis=1,
+    )
     out.to_csv(FEATURES_OUT, index=False)
 
-    emb = pd.DataFrame(np.array(embeddings).round(6), columns=[f"gpt2_emb_{i}" for i in range(768)])
-    emb.insert(0, "video_id", transcripts.video_id.values)
+    emb = pd.DataFrame(
+        np.array(embeddings).round(6),
+        columns=[f"gpt2_emb_{i}" for i in range(768)],
+    )
+    emb.insert(0, "video_id", merged["video_id"].values)
     emb.to_csv(EMBEDDINGS_OUT, index=False)
 
-    print(f"Saved {len(out)} rows, {extra.shape[1]} new features ({out.shape[1] - 2} handcrafted total) -> {FEATURES_OUT}")
+    print(f"Saved {len(out)} rows x {out.shape[1]} columns -> {FEATURES_OUT}")
     print(f"Saved {emb.shape[0]} x 768 GPT-2 embeddings -> {EMBEDDINGS_OUT}")
 
 

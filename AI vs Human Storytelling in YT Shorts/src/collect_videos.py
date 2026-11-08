@@ -20,7 +20,7 @@ yt = build("youtube", "v3", developerKey=os.environ["YT_API_KEY"])
 # File paths (anchored to this script's folder)
 OUT = pathlib.Path(__file__).resolve().parents[1] / "data"
 OUT.mkdir(exist_ok=True)
-CSV = OUT / "candidates.csv"
+CSV = OUT / "video_urls.csv"
 
 # Search Quries
 HUMAN_QUERIES = [
