@@ -39,6 +39,13 @@ HUMAN_QUERIES = [
     "sylvanian families drama",
     "animated food characters drama",
     "2d animated drama story voice acted",
+    # Batch 3 (Cole): more sources for the themes with the fewest human transcripts (horror, animal, fruit)
+    "horror short film",
+    "scary short film acting",
+    "creepy skit",
+    "dog skit acting",
+    "talking animals skit",
+    "talking fruit skit",
 ]
 AI_QUERIES = [
     "ai fruit drama",
@@ -62,6 +69,22 @@ AI_QUERIES = [
     "ai cartoon drama story",
     "sora short story drama",
     "ai horror short story",
+    # Batch 3 (Cole): more sources for the themes with the fewest AI transcripts (work, horror, animal, school, baby)
+    "ai boss employee story",
+    "ai workplace drama",
+    "ai waitress drama",
+    "ai ceo revenge story",
+    "ai horror story",
+    "ai scary story animation",
+    "ai ghost story",
+    "ai cat story",
+    "ai dog story",
+    "ai animal rescue story",
+    "ai school drama",
+    "ai teacher student story",
+    "ai bully story",
+    "ai baby story",
+    "ai pregnant wife story",
 ]
 
 # API Search Settings
