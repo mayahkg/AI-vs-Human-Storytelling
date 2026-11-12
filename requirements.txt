@@ -10,6 +10,7 @@ isodate==0.7.2
 
 # transcribe_videos.py
 faster-whisper==1.2.1
+av<16                 # faster-whisper 1.2.1 breaks with PyAV 16+ ('metadata_errors' error)
 yt-dlp
 
 # embeddings_generation.py

@@ -19,6 +19,9 @@ MAX_REPEAT_SHARE = 0.4       # share of repeated 3-word phrases; above this is a
 DELAY_RANGE = (3, 8)         # random pause (seconds) between downloads
 RETRY_FAILED = False         # True = retry videos whose download/transcription failed last run
 APPLY_TITLE_FILTER = True    # drop obvious non-stories by title (same rule for AI and human)
+# Only transcribe candidates in these themes (None = every theme). These are the 8 themes already in
+# data/transcripts.csv, so new videos fill the existing themes instead of starting one-sided new ones.
+THEMES_TO_FILL = {"animal", "baby", "couple", "family", "fruit", "horror", "school", "work"}
 # --------------------------------------------------------
 
 # Maps batch-1 source_queries to a theme. Batch-2 rows from collect_videos.py already have a 'topic'
@@ -67,6 +70,28 @@ THEME_MAP = {
     "drama skit": "general_drama",
     "mini drama skit original": "general_drama",
     "pov drama skit actress": "general_drama",
+    # Batch 3 (Cole): new sources, mapped onto the 8 themes used in data/transcripts.csv
+    "ai boss employee story": "work",
+    "ai workplace drama": "work",
+    "ai waitress drama": "work",
+    "ai ceo revenge story": "work",
+    "ai horror story": "horror",
+    "ai scary story animation": "horror",
+    "ai ghost story": "horror",
+    "horror short film": "horror",
+    "scary short film acting": "horror",
+    "creepy skit": "horror",
+    "ai cat story": "animal",
+    "ai dog story": "animal",
+    "ai animal rescue story": "animal",
+    "dog skit acting": "animal",
+    "talking animals skit": "animal",
+    "talking fruit skit": "fruit",
+    "ai school drama": "school",
+    "ai teacher student story": "school",
+    "ai bully story": "school",
+    "ai baby story": "baby",
+    "ai pregnant wife story": "baby",
 }
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]   # project root (the folder above src/)
@@ -133,6 +158,11 @@ if APPLY_TITLE_FILTER:
     print("Title filter removed:", src[junk].groupby("label").size().to_dict() or "nothing")
     src = src[~junk]
 
+if THEMES_TO_FILL:
+    skipped = src[~src["theme"].isin(THEMES_TO_FILL)]
+    print("Skipped (theme not in THEMES_TO_FILL):", skipped.groupby("theme").size().to_dict() or "nothing")
+    src = src[src["theme"].isin(THEMES_TO_FILL)]
+
 if WORK.exists():
     work = pd.read_csv(WORK)
     if RETRY_FAILED:
@@ -141,8 +171,12 @@ else:
     work = pd.DataFrame(columns=WORK_COLS)
 
 if len(work):
-    # Re-derive themes so earlier transcripts use the same theme names as new ones
-    work["theme"] = work["video_id"].map(src_all.set_index("video_id")["theme"]).fillna(work["theme"])
+    # Re-derive themes so earlier transcripts use the same theme names as new ones.
+    # Rows that already have one of the THEMES_TO_FILL themes keep it: a later search can find the same
+    # video under a different query, which would otherwise silently move it to another theme.
+    derived = work["video_id"].map(src_all.set_index("video_id")["theme"]).fillna(work["theme"])
+    keep = work["theme"].isin(THEMES_TO_FILL) if THEMES_TO_FILL else pd.Series(False, index=work.index)
+    work["theme"] = work["theme"].where(keep, derived)
     # Apply the junk check to transcripts collected in earlier runs
     reasons = work["transcript"].where(work["status"] == "ok").map(
         lambda t: junk_reason(t) if isinstance(t, str) else "")
@@ -230,7 +264,8 @@ while True:
         row = queues[key].pop(0)
         result = process(row)
         work = pd.concat([work, pd.DataFrame([result])], ignore_index=True)
-        work.to_csv(WORK, index=False)        # save after every video
+        work["n_words"] = work["n_words"].astype("Int64")   # keep whole numbers (failed rows are blank)
+        work.to_csv(WORK, index=False, lineterminator="\n")  # save after every video; \n keeps git diffs clean on Windows
         print(f"{theme:13} {label:5} {row['video_id']} -> {result['status']:11} "
               f"({result['n_words']} words)")
         time.sleep(random.uniform(*DELAY_RANGE))

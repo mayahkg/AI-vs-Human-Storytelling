@@ -8,7 +8,9 @@ What it does, in one pass:
   3. Keeps the stories and computes the text features.
   4. Writes data/features_filtered_by_ai.csv.
 
-Nothing is saved between runs, so every run judges every transcript again.
+Each LLM decision is saved to data/llm_judgments.csv (video_id + model), so a run that stops early
+(free Gemini keys allow 500 requests per model per day) picks up where it left off, and transcripts that were
+already judged by the same model are not sent again. Use --no-cache to judge every transcript from scratch.
 
 Usage (paths are anchored to the project root, one folder above src/):
     python src/filtered_feature_generation.py
@@ -43,6 +45,7 @@ except ImportError:                      # python-dotenv is optional here
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent     # project root (src/ lives inside it)
 DATA = ROOT / "data"
+JUDGMENTS = DATA / "llm_judgments.csv"   # saved LLM decisions, reused on the next run (same model only)
 load_dotenv(ROOT / ".env")
 
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-5-5")
@@ -207,6 +210,23 @@ def judge(transcript, provider, retries=4):
     return None
 
 
+def load_judgments(model):
+    """Saved decisions from earlier runs with this model: {video_id: decision}."""
+    if not JUDGMENTS.exists():
+        return {}
+    saved = pd.read_csv(JUDGMENTS, dtype={"video_id": str})
+    saved = saved[saved["model"] == model].drop_duplicates("video_id", keep="last")
+    return {r.video_id: {"llm_category": r.llm_category, "llm_confidence": float(r.llm_confidence),
+                         "llm_reason": "" if pd.isna(r.llm_reason) else str(r.llm_reason)}
+            for r in saved.itertuples()}
+
+
+def save_judgment(video_id, model, rec):
+    """Append one decision to data/llm_judgments.csv right away, so nothing is lost if the run stops."""
+    row = pd.DataFrame([{"video_id": video_id, "model": model, **rec}])
+    row.to_csv(JUDGMENTS, mode="a", header=not JUDGMENTS.exists(), index=False, lineterminator="\n")
+
+
 def row_key(df):
     """video_id if the file has one, otherwise a short hash of the transcript text."""
     if "video_id" in df.columns and df["video_id"].notna().all():
@@ -330,6 +350,8 @@ def main():
                     help="seconds between LLM calls (default: 4.5 for Gemini's free tier, 0.2 for Anthropic)")
     ap.add_argument("--allow-partial", action="store_true",
                     help="write the output even if some transcripts could not be judged")
+    ap.add_argument("--no-cache", action="store_true",
+                    help="ignore data/llm_judgments.csv and judge every transcript again")
     args = ap.parse_args()
     out_path = pathlib.Path(args.out)
 
@@ -351,23 +373,34 @@ def main():
             raise SystemExit("No API key found. Add GEMINI_API_KEY (free: https://aistudio.google.com/apikey) "
                              "or ANTHROPIC_API_KEY to the root .env and run again.")
         pause = args.sleep if args.sleep is not None else (4.5 if provider[3] == "Gemini" else 0.2)
-        print(f"Judging with {provider[3]} model {provider[2]} (about {len(df) * pause / 60:.0f} min)")
+        saved = {} if args.no_cache else load_judgments(provider[2])
+        todo = int((~df["video_id"].isin(list(saved))).sum())
+        print(f"Judging with {provider[3]} model {provider[2]}: {len(df) - todo} already saved in "
+              f"{JUDGMENTS.name}, {todo} to send (about {todo * pause / 60:.0f} min)")
 
-        decisions, failed, fails_in_a_row = {}, [], 0
-        for i, row in enumerate(df.itertuples(), 1):
+        def remember(idx, rec):
+            decisions[idx] = rec
+            if not args.no_cache:
+                save_judgment(df.at[idx, "video_id"], provider[2], rec)
+
+        decisions = {idx: saved[v] for idx, v in df["video_id"].items() if v in saved}
+        pending = df[~df.index.isin(list(decisions))]
+        failed, fails_in_a_row = [], 0
+        for i, row in enumerate(pending.itertuples(), 1):
             rec = judge(row.transcript, provider)
             if rec is None:
                 failed.append(row.Index)
                 fails_in_a_row += 1
                 if fails_in_a_row >= 5:
-                    failed += list(df.index[i:])            # everything after this was not tried
-                    print("Stopping: 5 calls in a row failed (probably a rate or daily limit).")
+                    failed += list(pending.index[i:])       # everything after this was not tried
+                    print("Stopping: 5 calls in a row failed (probably a rate or daily limit). "
+                          "Decisions so far are saved; run again later to continue.")
                     break
             else:
-                decisions[row.Index] = rec
+                remember(row.Index, rec)
                 fails_in_a_row = 0
             if i % 25 == 0:
-                print(f"  {i}/{len(df)} judged")
+                print(f"  {i}/{len(pending)} judged")
             time.sleep(pause)
 
         if failed and fails_in_a_row < 5:                    # one more try for the ones that failed
@@ -376,7 +409,7 @@ def main():
             for idx in failed:
                 time.sleep(max(pause, 5))
                 rec = judge(df.at[idx, "transcript"], provider, retries=2)
-                (decisions.__setitem__(idx, rec) if rec else still.append(idx))
+                (remember(idx, rec) if rec else still.append(idx))
             failed = still
     except FatalAPIError as e:
         raise SystemExit(f"\nStopped: {e}")
