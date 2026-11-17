@@ -5,8 +5,9 @@ What it does, in one pass:
   1. Reads data/transcripts.csv (rows that have a transcript).
   2. Asks an LLM about each transcript: is it a story (scripted dialogue skit or narrated story) or not
      (explainer, news, vlog, lyrics, tutorial...)? The model never sees the AI/human label.
-  3. Keeps the stories and computes the text features.
-  4. Writes data/features_filtered_by_ai.csv.
+  3. Saves the kept stories (no features yet) to data/stories_filtered.csv.
+  4. Computes the text features for those stories.
+  5. Writes data/features_filtered_by_ai.csv.
 
 Each LLM decision is saved to data/llm_judgments.csv (video_id + model), so a run that stops early
 (free Gemini keys allow 500 requests per model per day) picks up where it left off, and transcripts that were
@@ -16,6 +17,7 @@ Usage (paths are anchored to the project root, one folder above src/):
     python src/filtered_feature_generation.py
     python src/filtered_feature_generation.py --min-conf 0.7   # also drop low-confidence story calls
     python src/filtered_feature_generation.py --allow-partial  # write the file even if some calls failed
+    python src/filtered_feature_generation.py --filtered-out data/my_stories.csv  # choose the intermediate file
 
 Setup: put a key in the root .env
     GEMINI_API_KEY=...      free key from https://aistudio.google.com/apikey
@@ -345,6 +347,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--transcripts", default=str(DATA / "transcripts.csv"))
     ap.add_argument("--out", default=str(DATA / "features_filtered_by_ai.csv"))
+    ap.add_argument("--filtered-out", default=str(DATA / "stories_filtered.csv"),
+                    help="intermediate CSV with only the kept story rows (no features yet)")
     ap.add_argument("--min-conf", type=float, default=0.0, help="drop story calls below this confidence")
     ap.add_argument("--sleep", type=float, default=None,
                     help="seconds between LLM calls (default: 4.5 for Gemini's free tier, 0.2 for Anthropic)")
@@ -433,6 +437,12 @@ def main():
     kept = judged[judged["keep"]].reset_index(drop=True)
     if kept.empty:
         raise SystemExit("No stories left after filtering, so no features were written.")
+
+    # ---- save the filtered rows (before features) ----
+    filtered_path = pathlib.Path(args.filtered_out)
+    filtered_path.parent.mkdir(parents=True, exist_ok=True)
+    kept.drop(columns=["keep"]).to_csv(filtered_path, index=False)
+    print(f"\nSaved {len(kept)} filtered story rows to {filtered_path}")
 
     # ---- features ----
     feats = build_features(kept)
