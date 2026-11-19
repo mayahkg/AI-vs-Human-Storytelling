@@ -88,7 +88,7 @@ AI_QUERIES = [
 ]
 
 # API Search Settings
-PAGES = 3
+PAGES = 2                              # Lowered from 3 to save quota (not part of the cache key)
 HUMAN_BEFORE = "2023-01-10T00:00:00Z"  # Only Shorts from before AI was widely available
 AI_AFTER = "2025-01-01T00:00:00Z"
 MIN_SEC, MAX_SEC = 15, 90              # Shorts length
@@ -192,13 +192,35 @@ def collect(queries, query_type, **filters):
                 break
     return rows, quota_hit
 
-# Actual AI Collection
-all_rows = []
-ai_rows, quota_hit = collect(AI_QUERIES, "ai_q", publishedAfter=AI_AFTER)
-all_rows += ai_rows
-if not quota_hit:
-    human_rows, quota_hit = collect(HUMAN_QUERIES, "human_q", publishedBefore=HUMAN_BEFORE)
-    all_rows += human_rows
+# Filter variants. Filters are part of the cache key, so each variant is a fresh search
+# even with the same queries. The original searches (relevance order, no extra filters)
+# stay cached and are NOT re-run. Start with one variant per label; if the run adds fewer
+# than ~300 new rows, uncomment the next variant and rerun.
+AI_VARIANTS = [
+    dict(publishedAfter=AI_AFTER, order="date"),
+    # dict(publishedAfter=AI_AFTER, order="viewCount"),
+    # dict(publishedAfter="2025-01-01T00:00:00Z", publishedBefore="2025-07-01T00:00:00Z"),
+    # dict(publishedAfter="2025-07-01T00:00:00Z"),
+]
+HUMAN_VARIANTS = [
+    dict(publishedBefore=HUMAN_BEFORE, order="date"),
+    # dict(publishedBefore=HUMAN_BEFORE, order="viewCount"),
+    # dict(publishedBefore=HUMAN_BEFORE, videoCategoryId="24"),  # Entertainment
+    # dict(publishedBefore=HUMAN_BEFORE, videoCategoryId="1"),   # Film & Animation
+]
+
+# Actual Collection (one pass per filter variant; stops cleanly if quota runs out)
+all_rows, quota_hit = [], False
+for f in AI_VARIANTS:
+    if quota_hit:
+        break
+    rows, quota_hit = collect(AI_QUERIES, "ai_q", **f)
+    all_rows += rows
+for f in HUMAN_VARIANTS:
+    if quota_hit:
+        break
+    rows, quota_hit = collect(HUMAN_QUERIES, "human_q", **f)
+    all_rows += rows
 if not all_rows:
     raise SystemExit("No results collected. Check the errors above (key, API enabled, quota).")
 
