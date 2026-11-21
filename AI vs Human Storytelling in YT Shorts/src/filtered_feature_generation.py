@@ -8,23 +8,6 @@ What it does, in one pass:
   3. Saves the kept stories (no features yet) to data/stories_filtered.csv.
   4. Computes the text features for those stories.
   5. Writes data/features_filtered_by_ai.csv.
-
-Each LLM decision is saved to data/llm_judgments.csv (video_id + model), so a run that stops early
-(free Gemini keys allow 500 requests per model per day) picks up where it left off, and transcripts that were
-already judged by the same model are not sent again. Use --no-cache to judge every transcript from scratch.
-
-Usage (paths are anchored to the project root, one folder above src/):
-    python src/filtered_feature_generation.py
-    python src/filtered_feature_generation.py --min-conf 0.7   # also drop low-confidence story calls
-    python src/filtered_feature_generation.py --allow-partial  # write the file even if some calls failed
-    python src/filtered_feature_generation.py --filtered-out data/my_stories.csv  # choose the intermediate file
-
-Setup: put a key in the root .env
-    GEMINI_API_KEY=...      free key from https://aistudio.google.com/apikey
-    ANTHROPIC_API_KEY=...   (used instead if both are set)
-Optional in .env: GEMINI_MODEL=... or ANTHROPIC_MODEL=... to choose a model yourself.
-If GEMINI_MODEL is not set, the script asks Google which models your key can use and picks a Flash model.
-Free Gemini keys are rate-limited, so about 475 transcripts take roughly half an hour.
 """
 import argparse
 import hashlib
