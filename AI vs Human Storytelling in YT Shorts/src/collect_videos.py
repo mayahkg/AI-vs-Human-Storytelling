@@ -17,7 +17,7 @@ load_dotenv()
 # Creating API Client
 yt = build("youtube", "v3", developerKey=os.environ["YT_API_KEY"])
 
-# File paths (anchored to this script's folder)
+# File paths 
 OUT = pathlib.Path(__file__).resolve().parents[1] / "data"
 OUT.mkdir(exist_ok=True)
 CSV = OUT / "video_urls.csv"
@@ -39,7 +39,6 @@ HUMAN_QUERIES = [
     "sylvanian families drama",
     "animated food characters drama",
     "2d animated drama story voice acted",
-    # Batch 3 (Cole): more sources for the themes with the fewest human transcripts (horror, animal, fruit)
     "horror short film",
     "scary short film acting",
     "creepy skit",
@@ -69,7 +68,6 @@ AI_QUERIES = [
     "ai cartoon drama story",
     "sora short story drama",
     "ai horror short story",
-    # Batch 3 (Cole): more sources for the themes with the fewest AI transcripts (work, horror, animal, school, baby)
     "ai boss employee story",
     "ai workplace drama",
     "ai waitress drama",
@@ -192,24 +190,14 @@ def collect(queries, query_type, **filters):
                 break
     return rows, quota_hit
 
-# Filter variants. Filters are part of the cache key, so each variant is a fresh search
-# even with the same queries. The original searches (relevance order, no extra filters)
-# stay cached and are NOT re-run. Start with one variant per label; if the run adds fewer
-# than ~300 new rows, uncomment the next variant and rerun.
+# Code to Generate New Data after being Run
 AI_VARIANTS = [
     dict(publishedAfter=AI_AFTER, order="date"),
-    # dict(publishedAfter=AI_AFTER, order="viewCount"),
-    # dict(publishedAfter="2025-01-01T00:00:00Z", publishedBefore="2025-07-01T00:00:00Z"),
-    # dict(publishedAfter="2025-07-01T00:00:00Z"),
 ]
 HUMAN_VARIANTS = [
     dict(publishedBefore=HUMAN_BEFORE, order="date"),
-    # dict(publishedBefore=HUMAN_BEFORE, order="viewCount"),
-    # dict(publishedBefore=HUMAN_BEFORE, videoCategoryId="24"),  # Entertainment
-    # dict(publishedBefore=HUMAN_BEFORE, videoCategoryId="1"),   # Film & Animation
 ]
 
-# Actual Collection (one pass per filter variant; stops cleanly if quota runs out)
 all_rows, quota_hit = [], False
 for f in AI_VARIANTS:
     if quota_hit:
@@ -224,7 +212,6 @@ for f in HUMAN_VARIANTS:
 if not all_rows:
     raise SystemExit("No results collected. Check the errors above (key, API enabled, quota).")
 
-# Cleaning and filtering by duration, language, and blocked terms
 df = pd.DataFrame(all_rows).drop_duplicates("video_id")
 print("\nAfter dedupe, by query type:")
 print(df.query_type.value_counts())
@@ -237,7 +224,6 @@ print("After language filter:", df.query_type.value_counts().to_dict())
 
 df["text"] = (df.title + " " + df.description + " " + df.tags).str.lower()
 
-# Labelling Data
 def label(r):
     flagged = pd.notna(r.synthetic_flag) and bool(r.synthetic_flag)
     is_ai = bool(AI_RE.search(r.text)) or flagged or (
@@ -248,7 +234,6 @@ def label(r):
         return "uncertain" if HUMAN_BLOCK_RE.search(r.text) else "human_candidate"
     return "uncertain"
 
-# Runs label on every video, droping the "uncertain" ones, preventing certain channels from dominating
 df["group"] = df.apply(label, axis=1)
 print("\nQuery type vs label:")
 print(pd.crosstab(df.query_type, df.group))
@@ -260,11 +245,10 @@ if df.empty:
 df = (df.sample(frac=1, random_state=42)
         .groupby(["group", "channel"]).head(MAX_PER_CHANNEL))
 
-# Keep label, link, title, and the query that found it
 df["label"] = df.group.map({"ai_candidate": "AI", "human_candidate": "human"})
 new = df[["label", "url", "title", "source_query"]]
 
-# Merge with earlier results into one clean csv
+# Merging Old and New Data
 if CSV.exists():
     shutil.copy(CSV, OUT / "candidates_backup.csv")
     old = pd.read_csv(CSV)
@@ -280,7 +264,7 @@ out = out.drop_duplicates("url")
 out = out[["label", "url", "title", "source_query"]]
 out.to_csv(CSV, index=False)
 
-# Summary
+# Print a Summary
 print(f"\nSaved {len(out)} rows to {CSV}")
 print(out.label.value_counts().to_string())
 print("\nSample AI videos:")
