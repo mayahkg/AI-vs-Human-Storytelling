@@ -2,21 +2,15 @@
 Adds ~80 handcrafted features + GPT-2 detector signals and embeddings
 on top of the basic features from filtered_feature_generation.py.
 
-Reads:
-  data/features_filtered_by_ai.csv   (basic features + video_id + y)
-  data/transcripts.csv               (or transcripts_filtered.csv) for the raw text
+Input: 
+data/cleaned_data.csv             (or features_filtered_by_ai.csv) for the basic features
+data/transcripts.csv               (or transcripts_filtered.csv) for the raw text
 
-Writes:
-  data/features_and_embeddings.csv   transcript + all handcrafted features + y
-  data/gpt2_embeddings.csv           video_id + 768 GPT-2 embedding dimensions
-
-Run from project root:
-    python src/embeddings_generation.py
-
-Needs:
-    pip install vaderSentiment torch transformers
-    (downloads GPT-2 ~500 MB the first time)
+Ouput:
+data/features_and_embeddings.csv   transcript + all handcrafted features + y
+data/gpt2_embeddings.csv           video_id + 768 GPT-2 embedding dimensions
 """
+
 import math
 import os
 import re
@@ -29,15 +23,11 @@ import torch
 from transformers import GPT2LMHeadModel, GPT2TokenizerFast
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
-# ---------------------------------------------------------------------------
-# Paths (script lives in src/, data/ is one level up)
-# ---------------------------------------------------------------------------
+# File Paths and Basic Settings and Functions
 DATA = pathlib.Path(__file__).resolve().parent.parent / "data"
-FEATURES_IN = DATA / "features_filtered_by_ai.csv"
+FEATURES_IN = DATA / "cleaned_data.csv"
 FEATURES_OUT = DATA / "features_and_embeddings.csv"
 EMBEDDINGS_OUT = DATA / "gpt2_embeddings.csv"
-
-# Prefer the filtered transcripts file if it exists, otherwise the full one
 if (DATA / "transcripts_filtered.csv").exists():
     TRANSCRIPTS = DATA / "transcripts_filtered.csv"
 else:
@@ -59,9 +49,7 @@ def starts(pattern):
     return re.compile(r"\b(?:" + pattern + r")", re.I)
 
 
-# ---------------------------------------------------------------------------
-# 11 word families (exact lists from cole_features_simple.py)
-# ---------------------------------------------------------------------------
+# Word Lists and Families for more feature generation
 SIMPLE_FAMILIES = {
     # --- spoken vs. written style ---
     "discourse_markers": words(
@@ -112,9 +100,6 @@ SIMPLE_FAMILIES = {
     ),
 }
 
-# ---------------------------------------------------------------------------
-# Word lists used by the extra features
-# ---------------------------------------------------------------------------
 URGENCY = {"tonight", "today", "tomorrow", "now", "forever", "yesterday", "soon", "again", "finally"}
 IMPERATIVE_STARTS = {
     "go", "come", "look", "listen", "wait", "stop", "give", "get", "tell", "let",
@@ -256,20 +241,18 @@ PRONOUNS = {
     "they_rate": {"they", "them", "their", "theirs", "themselves", "they're"},
 }
 
-
+# Helper Functions for Feature Extraction
 def tokenize(text):
     return re.findall(r"[a-z]+(?:'[a-z]+)*", text.lower())
 
-
 def split_sentences(text):
     return [p.strip() for p in re.split(r"(?<=[.!?])\s+", text.strip()) if tokenize(p)] or [text]
-
 
 def syllables(word):
     groups = re.findall(r"[aeiouy]+", word)
     return max(1, len(groups) - (1 if word.endswith("e") and len(groups) > 1 and not word.endswith("le") else 0))
 
-
+# Embedding Extraction
 def gpt2_features(text):
     """GPT-2 reads the transcript; returns detector signals and the mean final-layer embedding."""
     ids = tokenizer(text, return_tensors="pt").input_ids[:, :1023]
@@ -279,8 +262,8 @@ def gpt2_features(text):
     logp = torch.log_softmax(out.logits[0, :-1], -1)
     target = ids[0, 1:]
     target_logp = logp[torch.arange(len(target)), target]
-    surprisal = (-target_logp / math.log(2)).numpy()                 # bits per token
-    rank = (logp > target_logp[:, None]).sum(1).numpy() + 1          # 1 = GPT-2's top guess
+    surprisal = (-target_logp / math.log(2)).numpy()                 
+    rank = (logp > target_logp[:, None]).sum(1).numpy() + 1        
     entropy = (-(logp.exp() * logp).sum(1) / math.log(2)).numpy()
     feats = {
         "gpt2_surprisal": surprisal.mean(),
@@ -296,7 +279,7 @@ def gpt2_features(text):
     }
     return feats, out.hidden_states[-1][0, 1:].mean(0).numpy()
 
-
+# Feature Extraction
 def extract(transcript):
     text = transcript.replace("’", "'")
     tokens = tokenize(text)
@@ -304,19 +287,17 @@ def extract(transcript):
     sents = split_sentences(text)
     k = len(sents)
     lengths = np.array([len(tokenize(s)) for s in sents], float)
-    pos = (np.cumsum(lengths) - lengths / 2) / lengths.sum()          # middle of each sentence, 0-1
+    pos = (np.cumsum(lengths) - lengths / 2) / lengths.sum()        
     first, last = pos < 1 / 3, pos >= 2 / 3
     mood = np.array([vader.polarity_scores(s)["compound"] for s in sents])
     intensity = np.abs(mood)
     per100 = lambda pattern: 100 * len(pattern.findall(text)) / n
 
-    # escalations: times emotional intensity sets a new high
     running, raises = 0.0, 0
     for v in intensity:
         if v > running + 0.1:
             raises, running = raises + 1, v
 
-    # topic jumps: gaps where the 3 sentences before and after share no content words
     content = [set(w for w in tokenize(s) if w not in STOPWORDS) for s in sents]
     overlaps = []
     for i in range(1, k):
@@ -397,7 +378,7 @@ def extract(transcript):
     f.update(g)
     return f, embedding
 
-
+# Main Function
 def main():
     if not FEATURES_IN.exists():
         raise SystemExit(
