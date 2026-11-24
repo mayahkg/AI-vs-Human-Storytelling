@@ -22,40 +22,30 @@ import numpy as np
 import pandas as pd
 import requests
 
-try:
-    from dotenv import load_dotenv
-except ImportError:                      # python-dotenv is optional here
-    def load_dotenv(*args, **kwargs):
-        return False
+from dotenv import load_dotenv
 
-ROOT = pathlib.Path(__file__).resolve().parent.parent     # project root (src/ lives inside it)
+ROOT = pathlib.Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
-JUDGMENTS = DATA / "llm_judgments.csv"   # saved LLM decisions, reused on the next run (same model only)
+JUDGMENTS = DATA / "llm_judgments.csv"
 load_dotenv(ROOT / ".env")
 
-ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-5-5")
-STORY_CATEGORIES = {"scripted_story", "narrated_story"}
+STORY_CATEGORIES = {"story"}
 VALID_CATEGORIES = STORY_CATEGORIES | {"non_story"}
-RATE_PER = 100            # rates are "per 100 words"
+RATE_PER = 100
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
-
 
 class FatalAPIError(Exception):
     """A problem retrying will not fix (wrong key, unknown model...). Stops the run with a clear message."""
 
-
-# ======================================================================================
-# 1. LLM story filter
-# ======================================================================================
+# Prompt for LLM to decide whether a transcript is storytelling or not
 SYSTEM_PROMPT = """You are labeling transcripts of short-form videos (under about 60 seconds).
 Decide whether each transcript is STORYTELLING content.
 
 Categories:
-- scripted_story: scripted scene, skit, sketch or drama told mainly through dialogue between characters
-  (including comedy skits, sitcom or movie scenes, and animated or fruit/character dramas).
-- narrated_story: a story told by a narrator or in first person, with specific characters or events
-  and a beginning, middle and end (personal anecdote, true-crime retelling, "AITA"-style story,
-  a short fictional story).
+- story: a story with specific characters or events, told either through dialogue between characters
+  (scripted scene, skit, sketch or drama, including comedy skits, sitcom or movie scenes, and
+  animated or fruit/character dramas) or through a narrator or first-person voice with a beginning,
+  middle and end (personal anecdote, true-crime retelling, "AITA"-style story, a short fictional story).
 - non_story: anything else, for example explainers, tutorials and how-tos, news or commentary,
   reactions, opinion or advice, listicles and fact videos, product demos, ads, promos or channel
   intros, lyrics or songs, pure stand-up or joke monologues without a narrative, step-by-step
@@ -70,7 +60,7 @@ Rules:
 - confidence is a number from 0 to 1.
 
 Respond with ONLY a JSON object, no other text:
-{"category": "scripted_story" | "narrated_story" | "non_story", "confidence": 0.0, "reason": "<max 15 words>"}"""
+{"category": "story" | "non_story", "confidence": 0.0, "reason": "<max 15 words>"}"""
 
 
 def _user_prompt(transcript):
@@ -112,17 +102,6 @@ def pick_gemini_model(names):
             or next((n for n in ("gemini-flash-lite-latest", "gemini-flash-latest") if n in names), None))
 
 
-def call_anthropic(transcript, key, model):
-    r = requests.post(
-        "https://api.anthropic.com/v1/messages",
-        headers={"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-        json={"model": model, "max_tokens": 150, "temperature": 0, "system": SYSTEM_PROMPT,
-              "messages": [{"role": "user", "content": _user_prompt(transcript)}]},
-        timeout=60)
-    r.raise_for_status()
-    return r.json()["content"][0]["text"]
-
-
 def call_gemini(transcript, key, model):
     r = requests.post(
         f"{GEMINI_BASE}/models/{model}:generateContent",
@@ -137,9 +116,7 @@ def call_gemini(transcript, key, model):
 
 
 def get_provider():
-    """Pick an LLM from whichever key is in the environment. Returns (function, key, model, name) or None."""
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        return call_anthropic, os.environ["ANTHROPIC_API_KEY"], ANTHROPIC_MODEL, "Anthropic"
+    """Gemini only. Returns (function, key, model, name) or None if no key is set."""
     key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not key:
         return None
@@ -201,6 +178,8 @@ def load_judgments(model):
         return {}
     saved = pd.read_csv(JUDGMENTS, dtype={"video_id": str})
     saved = saved[saved["model"] == model].drop_duplicates("video_id", keep="last")
+    saved["llm_category"] = saved["llm_category"].replace(
+        {"scripted_story": "story", "narrated_story": "story"})
     return {r.video_id: {"llm_category": r.llm_category, "llm_confidence": float(r.llm_confidence),
                          "llm_reason": "" if pd.isna(r.llm_reason) else str(r.llm_reason)}
             for r in saved.itertuples()}
@@ -218,10 +197,7 @@ def row_key(df):
         return df["video_id"].astype(str)
     return df["transcript"].apply(lambda t: "h_" + hashlib.md5(t.encode()).hexdigest()[:12])
 
-
-# ======================================================================================
-# 2. Text features (same definitions as features_v2.csv)
-# ======================================================================================
+# Loading in the sets of words for the feature extraction
 NEGATION_WORDS = {"no", "not", "never", "nothing", "nobody", "none", "neither", "nor", "cannot", "nope", "without"}
 REACTION_WORDS = {"oh", "ooh", "ah", "aah", "wow", "whoa", "woah", "ha", "haha", "hah", "hmm", "hm", "ugh",
                   "eww", "ew", "yay", "yikes", "omg", "oops", "aww", "aw", "huh", "damn", "gosh", "geez"}
@@ -236,24 +212,19 @@ PROFANITY = {"fuck", "fucking", "shit", "bitch", "damn", "hell", "ass", "bastard
              "nigga", "crap"}
 CTA_RE = re.compile(r"\b(subscribe|follow|comment|like and|part two|next part|link (below|in)|dm me)\b", re.I)
 
-
 def tokenize(text):
     return re.findall(r"[a-z]+(?:'[a-z]+)*", text.lower().replace("\u2019", "'"))
 
-
 def ttr(t):
     return len(set(t)) / len(t) if t else np.nan
-
 
 def mattr(t, w=30):
     if len(t) <= w:
         return ttr(t)
     return float(np.mean([len(set(t[i:i + w])) / w for i in range(len(t) - w + 1)]))
 
-
 def sentences(text):
     return [s.strip() for s in re.split(r"(?<=[.!?])\s+", text.strip()) if s.strip()]
-
 
 def v1_features(text):
     t = tokenize(text)
@@ -323,9 +294,7 @@ def build_features(df):
     return out.round(4)
 
 
-# ======================================================================================
-# 3. Main
-# ======================================================================================
+# Main Code
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--transcripts", default=str(DATA / "transcripts.csv"))
@@ -333,8 +302,8 @@ def main():
     ap.add_argument("--filtered-out", default=str(DATA / "stories_filtered.csv"),
                     help="intermediate CSV with only the kept story rows (no features yet)")
     ap.add_argument("--min-conf", type=float, default=0.0, help="drop story calls below this confidence")
-    ap.add_argument("--sleep", type=float, default=None,
-                    help="seconds between LLM calls (default: 4.5 for Gemini's free tier, 0.2 for Anthropic)")
+    ap.add_argument("--sleep", type=float, default=4.5,
+                    help="seconds between LLM calls (default: 4.5 for Gemini's free tier)")
     ap.add_argument("--allow-partial", action="store_true",
                     help="write the output even if some transcripts could not be judged")
     ap.add_argument("--no-cache", action="store_true",
@@ -358,8 +327,8 @@ def main():
         provider = get_provider()
         if provider is None:
             raise SystemExit("No API key found. Add GEMINI_API_KEY (free: https://aistudio.google.com/apikey) "
-                             "or ANTHROPIC_API_KEY to the root .env and run again.")
-        pause = args.sleep if args.sleep is not None else (4.5 if provider[3] == "Gemini" else 0.2)
+                             "to the root .env and run again.")
+        pause = args.sleep
         saved = {} if args.no_cache else load_judgments(provider[2])
         todo = int((~df["video_id"].isin(list(saved))).sum())
         print(f"Judging with {provider[3]} model {provider[2]}: {len(df) - todo} already saved in "
