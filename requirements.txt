@@ -1,10 +1,10 @@
 # Shared
 numpy==2.5.4
 pandas==3.0.6
-python-dotenv
-requests
+python-dotenv         # collect_videos.py, filtered_feature_generation.py
+requests              # filtered_feature_generation.py (Gemini REST calls)
 
-# collect_videos.py
+# collect_videos.py  (needs YT_API_KEY in .env)
 google-api-python-client==2.201.0
 isodate==0.7.2
 
@@ -12,6 +12,9 @@ isodate==0.7.2
 faster-whisper==1.2.1
 av<16                 # faster-whisper 1.2.1 breaks with PyAV 16+ ('metadata_errors' error)
 yt-dlp
+
+# filtered_feature_generation.py  (needs GEMINI_API_KEY or GOOGLE_API_KEY in .env;
+# no extra packages beyond requests / python-dotenv / pandas / numpy)
 
 # embeddings_generation.py
 torch
