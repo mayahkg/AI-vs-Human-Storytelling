@@ -425,7 +425,7 @@ def main():
     base_cols = [c for c in features.columns if c not in ("video_id", "label", "y")]
     out = pd.concat(
         [
-            merged[["transcript"]].reset_index(drop=True),
+            merged[["video_id", "transcript"]].reset_index(drop=True),
             merged[base_cols].reset_index(drop=True),
             extra.reset_index(drop=True),
             merged[["y"]].reset_index(drop=True),
